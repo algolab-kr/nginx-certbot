@@ -1,1 +1,3 @@
 /data/certbot
+# Generated from app.conf.template by init-letsencrypt.sh
+/data/nginx/app.conf

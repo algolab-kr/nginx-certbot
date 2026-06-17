@@ -40,6 +40,18 @@ docker compose run --rm --entrypoint "\
 echo
 
 
+echo "### Generating nginx config for ${domains[0]} ..."
+nginx_template="./data/nginx/app.conf.template"
+nginx_conf="./data/nginx/app.conf"
+if [ ! -e "$nginx_template" ]; then
+  echo "Error: template $nginx_template not found." >&2
+  exit 1
+fi
+sed -e "s|\${DOMAIN}|${domains[0]}|g" \
+    "$nginx_template" > "$nginx_conf"
+echo
+
+
 echo "### Starting nginx ..."
 docker compose up --force-recreate -d nginx
 echo
