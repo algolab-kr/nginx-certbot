@@ -148,6 +148,7 @@ esac
 
 docker compose run --rm --entrypoint "\
   certbot certonly --webroot -w /var/www/certbot \
+    --cert-name ${public_domains[0]} \
     $staging_arg \
     $email_arg \
     $domain_args \
