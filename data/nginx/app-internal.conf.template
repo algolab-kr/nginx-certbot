@@ -1,0 +1,31 @@
+# app-internal.conf.template — 내부 전용(8443) 서버 블록.
+# init-letsencrypt.sh가 private_domains가 있을 때만 app-internal.conf로 렌더링한다.
+#   ${INTERNAL_DOMAIN}  -> private_domains[0]
+#   ${HOST_PRIVATE_IP}  -> 이 호스트의 자동 감지된 private IP
+# 인증서는 init의 사설 CA 단계가 만든 live/${INTERNAL_DOMAIN}/ 를 사용한다.
+# 공개(443) 서비스와 분리: 내부 서비스 라우팅은 server-locations-internal/ 에 둔다.
+
+# 내부 전용 — 8443
+server {
+    listen 8443 ssl;
+    server_name ${INTERNAL_DOMAIN};
+    server_tokens off;
+
+    # 사설 CA 인증서 (init-letsencrypt.sh의 사설 CA 단계에서 생성)
+    ssl_certificate     /etc/letsencrypt/live/${INTERNAL_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${INTERNAL_DOMAIN}/privkey.pem;
+    include /etc/letsencrypt/options-ssl-nginx.conf;
+    ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+
+    # 방어 한 겹 더: 사설 대역만 허용(private DNS만으로도 막히지만 IP 레벨에서도 차단).
+    allow 10.0.0.0/16;
+    deny  all;
+
+    # 내부 전용 서비스 라우팅은 server-locations-internal/*.conf.template 에 둔다(gitignored).
+    include /etc/nginx/conf.d/server-locations-internal/*.conf;
+
+    location / {
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+}

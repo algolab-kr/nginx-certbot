@@ -1,0 +1,21 @@
+# Internal-only location snippet, included inside the 8443 server block of app-internal.conf.
+#
+# Copy this to a `.conf.template` file here (e.g. `model-a.conf.template`) and edit it.
+# init-letsencrypt.sh renders every *.conf.template -> *.conf, substituting
+# ${HOST_PRIVATE_IP} with this host's auto-detected private IP. Rendered only when
+# private_domains is set. nginx loads the rendered *.conf only. Both *.conf and
+# *.conf.template are gitignored, so internal routing stays out of this public repo.
+#
+# The 8443 server already enforces `allow 10.0.0.0/16; deny all;` at the server level,
+# so everything here is internal-only. Add per-location allow/deny to narrow further.
+#
+#   ${HOST_PRIVATE_IP} : auto-injected backend host IP. nginx runs in a container, so
+#                        127.0.0.1 would be the container itself — use the host IP.
+
+location /model-a/ {
+    proxy_pass          http://${HOST_PRIVATE_IP}:9090/;
+    proxy_set_header    Host                $http_host;
+    proxy_set_header    X-Real-IP           $remote_addr;
+    proxy_set_header    X-Forwarded-For     $proxy_add_x_forwarded_for;
+    proxy_set_header    X-Forwarded-Proto   $scheme;
+}

@@ -100,6 +100,48 @@ if [ ${#private_domains[@]} -ne 0 ]; then
 fi
 
 
+# 호스트(EC2)의 private IP를 한 번만 감지해 $host_private_ip에 채운다.
+# HOST_PRIVATE_IP 환경변수로 덮어쓸 수 있음. 감지 실패 시 명확한 에러로 중단.
+host_private_ip="${HOST_PRIVATE_IP:-}"
+ensure_host_private_ip() {
+  [ -n "$host_private_ip" ] && return 0
+  # 1) EC2 IMDSv2 → 2) IMDSv1 → 3) 로컬 인터페이스 순으로 시도
+  local token
+  token=$(curl -s -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
+    -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+  if [ -n "$token" ]; then
+    host_private_ip=$(curl -s -m 2 -H "X-aws-ec2-metadata-token: $token" \
+      "http://169.254.169.254/latest/meta-data/local-ipv4" 2>/dev/null)
+  fi
+  [ -z "$host_private_ip" ] && host_private_ip=$(curl -s -m 2 \
+    "http://169.254.169.254/latest/meta-data/local-ipv4" 2>/dev/null)
+  [ -z "$host_private_ip" ] && host_private_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  if ! echo "$host_private_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    echo "Error: failed to detect host private IP (got '$host_private_ip')." >&2
+    echo "       Set it explicitly and re-run, e.g.: HOST_PRIVATE_IP=10.0.1.32 ./init-letsencrypt.sh" >&2
+    exit 1
+  fi
+}
+
+# 디렉토리 내 *.conf.template 을 *.conf 로 렌더링하며 ${HOST_PRIVATE_IP}를 주입한다.
+# 인자: 스니펫 디렉토리 경로. 템플릿이 없으면 조용히 통과.
+render_location_snippets() {
+  local dir="$1" tmpl out
+  shopt -s nullglob
+  local templates=("$dir"/*.conf.template)
+  shopt -u nullglob
+  [ ${#templates[@]} -eq 0 ] && return 0
+  ensure_host_private_ip
+  echo "### Rendering snippets in $dir (HOST_PRIVATE_IP=$host_private_ip) ..."
+  for tmpl in "${templates[@]}"; do
+    out="${tmpl%.template}"
+    sed -e "s|\${HOST_PRIVATE_IP}|$host_private_ip|g" "$tmpl" > "$out"
+    echo "  $(basename "$tmpl") -> $(basename "$out")"
+  done
+  echo
+}
+
+# --- public (443) -------------------------------------------------------------
 echo "### Generating nginx config for ${public_domains[0]} ..."
 nginx_template="./data/nginx/app.conf.template"
 nginx_conf="./data/nginx/app.conf"
@@ -117,42 +159,28 @@ fi
 sed -e "s|\${DOMAIN}|${public_domains[0]}|g" \
     "$nginx_template" > "$nginx_conf"
 echo
+render_location_snippets "./data/nginx/server-locations"
 
-
-# 배포별 location 스니펫(server-locations/*.conf.template)을 렌더링한다.
-# 백엔드 private IP는 이 호스트에서 자동 감지해 ${HOST_PRIVATE_IP} 자리에 주입한다.
-# (docs 접근 허용 IP 같은 배포별 값은 *.conf.template 안에 직접 적어 둔다 — 레포에 안 올라감.)
-locations_dir="./data/nginx/server-locations"
-shopt -s nullglob
-location_templates=("$locations_dir"/*.conf.template)
-shopt -u nullglob
-if [ ${#location_templates[@]} -ne 0 ]; then
-  # 호스트(EC2)의 private IP 자동 감지. HOST_PRIVATE_IP 환경변수로 덮어쓸 수 있음.
-  host_private_ip="${HOST_PRIVATE_IP:-}"
-  if [ -z "$host_private_ip" ]; then
-    # 1) EC2 IMDSv2 → 2) IMDSv1 → 3) 로컬 인터페이스 순으로 시도
-    imds_token=$(curl -s -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
-      -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
-    if [ -n "$imds_token" ]; then
-      host_private_ip=$(curl -s -m 2 -H "X-aws-ec2-metadata-token: $imds_token" \
-        "http://169.254.169.254/latest/meta-data/local-ipv4" 2>/dev/null)
-    fi
-    [ -z "$host_private_ip" ] && host_private_ip=$(curl -s -m 2 \
-      "http://169.254.169.254/latest/meta-data/local-ipv4" 2>/dev/null)
-    [ -z "$host_private_ip" ] && host_private_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
-  fi
-  if ! echo "$host_private_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
-    echo "Error: failed to detect host private IP (got '$host_private_ip')." >&2
-    echo "       Set it explicitly and re-run, e.g.: HOST_PRIVATE_IP=10.0.1.32 ./init-letsencrypt.sh" >&2
+# --- internal (8443) — private 도메인이 있을 때만 -------------------------------
+# 사설 CA 인증서로 내부 전용 서버를 띄운다. 라우팅은 server-locations-internal/ 에 둔다.
+internal_template="./data/nginx/app-internal.conf.template"
+internal_conf="./data/nginx/app-internal.conf"
+if [ ${#private_domains[@]} -ne 0 ]; then
+  if [ ! -e "$internal_template" ]; then
+    echo "Error: template $internal_template not found." >&2
     exit 1
   fi
-  echo "### Rendering server-locations snippets (HOST_PRIVATE_IP=$host_private_ip) ..."
-  for tmpl in "${location_templates[@]}"; do
-    out="${tmpl%.template}"
-    sed -e "s|\${HOST_PRIVATE_IP}|$host_private_ip|g" "$tmpl" > "$out"
-    echo "  $(basename "$tmpl") -> $(basename "$out")"
-  done
+  ensure_host_private_ip
+  echo "### Generating internal (8443) nginx config for ${private_domains[0]} ..."
+  sed -e "s|\${INTERNAL_DOMAIN}|${private_domains[0]}|g" \
+      -e "s|\${HOST_PRIVATE_IP}|$host_private_ip|g" \
+      "$internal_template" > "$internal_conf"
   echo
+  render_location_snippets "./data/nginx/server-locations-internal"
+else
+  # private 도메인이 없으면, 이전 실행에서 남은 내부 설정 때문에 nginx가
+  # (없는 사설 CA 인증서를 로드하려다) 죽지 않도록 제거한다.
+  rm -f "$internal_conf"
 fi
 
 

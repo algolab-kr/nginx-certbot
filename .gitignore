@@ -2,8 +2,12 @@
 # Generated from app.conf.template by init-letsencrypt.sh
 /data/nginx/app.conf
 /data/nginx/app.conf.bak
+# Rendered internal (8443) server config (from app-internal.conf.template)
+/data/nginx/app-internal.conf
 # Deployment-specific location snippets — kept out of this public repo.
 # Ignore the source templates (*.conf.template) and rendered output (*.conf);
 # keep only the generic *.conf.example tracked.
 /data/nginx/server-locations/*.conf
 /data/nginx/server-locations/*.conf.template
+/data/nginx/server-locations-internal/*.conf
+/data/nginx/server-locations-internal/*.conf.template

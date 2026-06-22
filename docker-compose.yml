@@ -9,6 +9,9 @@ services:
     ports:
       - "80:80"
       - "443:443"
+      # 내부 전용(8443): private_domains가 설정돼 app-internal.conf가 생성될 때 사용.
+      # 보안그룹/방화벽에서 8443은 사설 대역(VPC)에서만 열어 둘 것.
+      - "8443:8443"
     command: "/bin/sh -c 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & nginx -g \"daemon off;\"'"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost/healthz"]
