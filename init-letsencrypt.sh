@@ -19,13 +19,65 @@ email="" # Adding a valid address is strongly recommended
 staging=0 # Set to 1 if you're testing your setup to avoid hitting request limits
 internal_ca_days=3650 # 사설 CA 인증서 유효기간(일)
 internal_cert_days=825 # 사설 서버 인증서 유효기간(일)
+renew_threshold_days=30 # 만료까지 이 일수 미만으로 남으면 유효하지 않은 것으로 보고 재발급한다.
+
+# 이미 유효한 공인 인증서가 있어도 강제로 재발급할지 여부.
+# FORCE_RENEWAL=1 환경변수 또는 --force/-f 인자로 켤 수 있다.
+force_renewal="${FORCE_RENEWAL:-0}"
+for arg in "$@"; do
+  case "$arg" in
+    --force|-f) force_renewal=1 ;;
+  esac
+done
 
 if [ ${#public_domains[@]} -eq 0 ]; then
   echo "Error: public_domains is empty. At least one public domain is required." >&2
   exit 1
 fi
 
-if [ -d "$data_path" ]; then
+# 기존 공인 인증서가 "유효"한지 검사한다. 다음을 모두 만족해야 유효(반환 0):
+#   1) live/<primary>/fullchain.pem 이 존재
+#   2) 더미 인증서(CN=localhost)가 아님
+#   3) 만료까지 renew_threshold_days 이상 남음
+#   4) 요청한 모든 public 도메인을 SAN에 포함
+# 호스트의 openssl로 검사하며, openssl이 없으면 검사를 포기하고 재발급을 진행한다.
+public_cert_is_valid() {
+  local primary="${public_domains[0]}"
+  local cert="$data_path/conf/live/$primary/fullchain.pem"
+  [ -e "$cert" ] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+
+  # 더미 인증서 거부
+  if openssl x509 -in "$cert" -noout -subject 2>/dev/null | grep -qi 'CN *= *localhost'; then
+    return 1
+  fi
+  # 만료 임박 거부
+  if ! openssl x509 -in "$cert" -noout -checkend $((renew_threshold_days * 86400)) >/dev/null 2>&1; then
+    return 1
+  fi
+  # 요청한 모든 도메인이 SAN(DNS:)에 포함되어야 함
+  local san d esc
+  san=$(openssl x509 -in "$cert" -noout -ext subjectAltName 2>/dev/null)
+  for d in "${public_domains[@]}"; do
+    esc=$(printf '%s' "$d" | sed 's/[.[\*^$]/\\&/g')
+    if ! printf '%s' "$san" | grep -qE "DNS:$esc(,|[[:space:]]|\$)"; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# 재발급 여부 결정: 이미 유효한 인증서가 있으면 기본적으로 건너뛴다.
+skip_public_issue=0
+if [ "$force_renewal" != "1" ] && public_cert_is_valid; then
+  skip_public_issue=1
+  echo "### Existing valid certificate found for ${public_domains[0]} (>= ${renew_threshold_days} days left). Skipping issuance by default."
+  echo "    Re-run with --force (or FORCE_RENEWAL=1) to re-issue anyway."
+  echo
+fi
+
+# 재발급할 때만(=기존 인증서를 덮어쓸 때만) 교체 여부를 묻는다.
+if [ -d "$data_path" ] && [ "$skip_public_issue" != "1" ]; then
   read -p "Existing data found for $public_domains. Continue and replace existing certificate? (y/N) " decision
   if [ "$decision" != "Y" ] && [ "$decision" != "y" ]; then
     exit
@@ -41,15 +93,18 @@ if [ ! -e "$data_path/conf/options-ssl-nginx.conf" ] || [ ! -e "$data_path/conf/
   echo
 fi
 
-echo "### Creating dummy certificate for $public_domains ..."
-path="/etc/letsencrypt/live/$public_domains"
-mkdir -p "$data_path/conf/live/$public_domains"
-docker compose run --rm --entrypoint "\
-  openssl req -x509 -nodes -newkey rsa:$rsa_key_size -days 1\
-    -keyout '$path/privkey.pem' \
-    -out '$path/fullchain.pem' \
-    -subj '/CN=localhost'" certbot
-echo
+# 유효한 인증서를 재사용할 때는 더미 인증서로 덮어쓰지 않는다(실인증서 유실 방지).
+if [ "$skip_public_issue" != "1" ]; then
+  echo "### Creating dummy certificate for $public_domains ..."
+  path="/etc/letsencrypt/live/$public_domains"
+  mkdir -p "$data_path/conf/live/$public_domains"
+  docker compose run --rm --entrypoint "\
+    openssl req -x509 -nodes -newkey rsa:$rsa_key_size -days 1\
+      -keyout '$path/privkey.pem' \
+      -out '$path/fullchain.pem' \
+      -subj '/CN=localhost'" certbot
+  echo
+fi
 
 
 # 내부 전용 도메인은 사설 CA로 인증서를 발급한다. private_domains가 비어 있으면 건너뛴다.
@@ -188,50 +243,53 @@ echo "### Starting nginx ..."
 docker compose up --force-recreate -d nginx
 echo
 
-echo "### Deleting dummy/stale certificate lineages for $public_domains ..."
-# base 이름과 접미사 계보(-0001, -0002 ...)를 모두 제거해 certbot이 --cert-name으로
-# 깨끗하게 base 이름($public_domains)에 재발급하도록 한다.
-# 주의: 글롭은 컨테이너 셸에서 확장되도록 sh -c 안에 둔다. 사설 CA 계보
-# (ai-api-dev.internal... 등 다른 이름)는 이 글롭에 안 걸리므로 안전하다.
-docker compose run --rm --entrypoint sh certbot -c "\
-  rm -Rf /etc/letsencrypt/live/$public_domains /etc/letsencrypt/live/$public_domains-* \
-         /etc/letsencrypt/archive/$public_domains /etc/letsencrypt/archive/$public_domains-* \
-         /etc/letsencrypt/renewal/$public_domains.conf /etc/letsencrypt/renewal/$public_domains-*.conf"
-echo
+# 유효한 인증서를 재사용할 때는 계보 삭제와 재발급을 모두 건너뛴다.
+if [ "$skip_public_issue" != "1" ]; then
+  echo "### Deleting dummy/stale certificate lineages for $public_domains ..."
+  # base 이름과 접미사 계보(-0001, -0002 ...)를 모두 제거해 certbot이 --cert-name으로
+  # 깨끗하게 base 이름($public_domains)에 재발급하도록 한다.
+  # 주의: 글롭은 컨테이너 셸에서 확장되도록 sh -c 안에 둔다. 사설 CA 계보
+  # (ai-api-dev.internal... 등 다른 이름)는 이 글롭에 안 걸리므로 안전하다.
+  docker compose run --rm --entrypoint sh certbot -c "\
+    rm -Rf /etc/letsencrypt/live/$public_domains /etc/letsencrypt/live/$public_domains-* \
+           /etc/letsencrypt/archive/$public_domains /etc/letsencrypt/archive/$public_domains-* \
+           /etc/letsencrypt/renewal/$public_domains.conf /etc/letsencrypt/renewal/$public_domains-*.conf"
+  echo
 
 
-echo "### Requesting Let's Encrypt certificate for $public_domains ..."
-#Join $public_domains to -d args
-domain_args=""
-for domain in "${public_domains[@]}"; do
-  domain_args="$domain_args -d $domain"
-done
+  echo "### Requesting Let's Encrypt certificate for $public_domains ..."
+  #Join $public_domains to -d args
+  domain_args=""
+  for domain in "${public_domains[@]}"; do
+    domain_args="$domain_args -d $domain"
+  done
 
-# Select appropriate email arg
-case "$email" in
-  "") email_arg="--register-unsafely-without-email" ;;
-  *) email_arg="--email $email" ;;
-esac
+  # Select appropriate email arg
+  case "$email" in
+    "") email_arg="--register-unsafely-without-email" ;;
+    *) email_arg="--email $email" ;;
+  esac
 
-# Enable staging mode if needed
-if [ $staging != "0" ]; then staging_arg="--staging"; fi
+  # Enable staging mode if needed
+  if [ $staging != "0" ]; then staging_arg="--staging"; fi
 
-# Select key type arguments
-case "$key_type" in
-  ecdsa) key_args="--key-type ecdsa --elliptic-curve $elliptic_curve" ;;
-  *)     key_args="--key-type rsa --rsa-key-size $rsa_key_size" ;;
-esac
+  # Select key type arguments
+  case "$key_type" in
+    ecdsa) key_args="--key-type ecdsa --elliptic-curve $elliptic_curve" ;;
+    *)     key_args="--key-type rsa --rsa-key-size $rsa_key_size" ;;
+  esac
 
-docker compose run --rm --entrypoint "\
-  certbot certonly --webroot -w /var/www/certbot \
-    --cert-name ${public_domains[0]} \
-    $staging_arg \
-    $email_arg \
-    $domain_args \
-    $key_args \
-    --agree-tos \
-    --force-renewal" certbot
-echo
+  docker compose run --rm --entrypoint "\
+    certbot certonly --webroot -w /var/www/certbot \
+      --cert-name ${public_domains[0]} \
+      $staging_arg \
+      $email_arg \
+      $domain_args \
+      $key_args \
+      --agree-tos \
+      --force-renewal" certbot
+  echo
+fi
 
 echo "### Reloading nginx ..."
 docker compose exec nginx nginx -s reload
