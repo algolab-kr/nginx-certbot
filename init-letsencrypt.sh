@@ -160,11 +160,15 @@ echo "### Starting nginx ..."
 docker compose up --force-recreate -d nginx
 echo
 
-echo "### Deleting dummy certificate for $public_domains ..."
-docker compose run --rm --entrypoint "\
-  rm -Rf /etc/letsencrypt/live/$public_domains && \
-  rm -Rf /etc/letsencrypt/archive/$public_domains && \
-  rm -Rf /etc/letsencrypt/renewal/$public_domains.conf" certbot
+echo "### Deleting dummy/stale certificate lineages for $public_domains ..."
+# base 이름과 접미사 계보(-0001, -0002 ...)를 모두 제거해 certbot이 --cert-name으로
+# 깨끗하게 base 이름($public_domains)에 재발급하도록 한다.
+# 주의: 글롭은 컨테이너 셸에서 확장되도록 sh -c 안에 둔다. 사설 CA 계보
+# (ai-api-dev.internal... 등 다른 이름)는 이 글롭에 안 걸리므로 안전하다.
+docker compose run --rm --entrypoint sh certbot -c "\
+  rm -Rf /etc/letsencrypt/live/$public_domains /etc/letsencrypt/live/$public_domains-* \
+         /etc/letsencrypt/archive/$public_domains /etc/letsencrypt/archive/$public_domains-* \
+         /etc/letsencrypt/renewal/$public_domains.conf /etc/letsencrypt/renewal/$public_domains-*.conf"
 echo
 
 
