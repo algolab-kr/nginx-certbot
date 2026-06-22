@@ -1,0 +1,35 @@
+# Deployment-specific location snippet, included inside the 443 server block of app.conf.
+#
+# Copy this to a `.conf.template` file here (e.g. `api.conf.template`) and edit it.
+# init-letsencrypt.sh renders every *.conf.template -> *.conf, substituting
+# ${HOST_PRIVATE_IP} with this host's auto-detected private IP. nginx loads the
+# rendered *.conf only. Both *.conf and *.conf.template are gitignored, so
+# deployment details (backend IP, allow-lists) stay out of this public repo and
+# survive `init-letsencrypt.sh` re-runs (which regenerate app.conf from its template).
+#
+# Only `location` blocks belong here — the surrounding `server { ... }`, TLS, and
+# server_name come from app.conf. Do not use ${DOMAIN} here; it is not templated.
+#
+#   ${HOST_PRIVATE_IP} : auto-injected backend host IP. Do not hardcode it.
+#                        Override detection with HOST_PRIVATE_IP=... ./init-letsencrypt.sh
+#   allow / deny       : put access-control IPs (e.g. who may reach /docs) directly
+#                        in your .conf.template — they live only in the gitignored file.
+
+# Public API: proxied to the backend on the auto-detected host IP.
+location /api/ {
+    proxy_pass          http://${HOST_PRIVATE_IP}:8000/;
+    proxy_set_header    Host                $http_host;
+    proxy_set_header    X-Real-IP           $remote_addr;
+    proxy_set_header    X-Forwarded-For     $proxy_add_x_forwarded_for;
+    proxy_set_header    X-Forwarded-Proto   $scheme;
+}
+
+# Docs restricted to allowed client IPs (kept in this gitignored file, not the repo).
+location /api/docs {
+    allow 10.0.0.0/16;   # <-- IPs/ranges allowed to reach the docs
+    deny  all;
+    proxy_pass          http://${HOST_PRIVATE_IP}:8000/docs;
+    proxy_set_header    Host                $http_host;
+    proxy_set_header    X-Real-IP           $remote_addr;
+    proxy_set_header    X-Forwarded-Proto   $scheme;
+}

@@ -1,3 +1,9 @@
 /data/certbot
 # Generated from app.conf.template by init-letsencrypt.sh
 /data/nginx/app.conf
+/data/nginx/app.conf.bak
+# Deployment-specific location snippets — kept out of this public repo.
+# Ignore the source templates (*.conf.template) and rendered output (*.conf);
+# keep only the generic *.conf.example tracked.
+/data/nginx/server-locations/*.conf
+/data/nginx/server-locations/*.conf.template

@@ -107,9 +107,53 @@ if [ ! -e "$nginx_template" ]; then
   echo "Error: template $nginx_template not found." >&2
   exit 1
 fi
+# 기존 app.conf가 있으면 덮어쓰기 전에 백업해 둔다(직접 수정분 유실 방지).
+# 배포별 라우팅(proxy_pass 등)은 app.conf가 아니라 data/nginx/server-locations/ 의
+# *.conf.template 에 넣는다(아래에서 렌더링됨). app.conf.template은 generic하게 유지.
+if [ -e "$nginx_conf" ]; then
+  cp "$nginx_conf" "$nginx_conf.bak"
+  echo "Backed up existing $nginx_conf to $nginx_conf.bak"
+fi
 sed -e "s|\${DOMAIN}|${public_domains[0]}|g" \
     "$nginx_template" > "$nginx_conf"
 echo
+
+
+# 배포별 location 스니펫(server-locations/*.conf.template)을 렌더링한다.
+# 백엔드 private IP는 이 호스트에서 자동 감지해 ${HOST_PRIVATE_IP} 자리에 주입한다.
+# (docs 접근 허용 IP 같은 배포별 값은 *.conf.template 안에 직접 적어 둔다 — 레포에 안 올라감.)
+locations_dir="./data/nginx/server-locations"
+shopt -s nullglob
+location_templates=("$locations_dir"/*.conf.template)
+shopt -u nullglob
+if [ ${#location_templates[@]} -ne 0 ]; then
+  # 호스트(EC2)의 private IP 자동 감지. HOST_PRIVATE_IP 환경변수로 덮어쓸 수 있음.
+  host_private_ip="${HOST_PRIVATE_IP:-}"
+  if [ -z "$host_private_ip" ]; then
+    # 1) EC2 IMDSv2 → 2) IMDSv1 → 3) 로컬 인터페이스 순으로 시도
+    imds_token=$(curl -s -m 2 -X PUT "http://169.254.169.254/latest/api/token" \
+      -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+    if [ -n "$imds_token" ]; then
+      host_private_ip=$(curl -s -m 2 -H "X-aws-ec2-metadata-token: $imds_token" \
+        "http://169.254.169.254/latest/meta-data/local-ipv4" 2>/dev/null)
+    fi
+    [ -z "$host_private_ip" ] && host_private_ip=$(curl -s -m 2 \
+      "http://169.254.169.254/latest/meta-data/local-ipv4" 2>/dev/null)
+    [ -z "$host_private_ip" ] && host_private_ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+  fi
+  if ! echo "$host_private_ip" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$'; then
+    echo "Error: failed to detect host private IP (got '$host_private_ip')." >&2
+    echo "       Set it explicitly and re-run, e.g.: HOST_PRIVATE_IP=10.0.1.32 ./init-letsencrypt.sh" >&2
+    exit 1
+  fi
+  echo "### Rendering server-locations snippets (HOST_PRIVATE_IP=$host_private_ip) ..."
+  for tmpl in "${location_templates[@]}"; do
+    out="${tmpl%.template}"
+    sed -e "s|\${HOST_PRIVATE_IP}|$host_private_ip|g" "$tmpl" > "$out"
+    echo "  $(basename "$tmpl") -> $(basename "$out")"
+  done
+  echo
+fi
 
 
 echo "### Starting nginx ..."
